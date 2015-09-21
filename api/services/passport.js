@@ -2,6 +2,7 @@ var path = require('path');
 var url = require('url');
 var passport = require('passport');
 var _ = require('lodash');
+var Promise = require("bluebird");
 
 /**
  * Passport Service
@@ -64,7 +65,7 @@ passport.protocols = require('./protocols');
  * @param {Function} next
  */
 passport.connect = function (req, query, profile, next) {
-  var user = { };
+  var user = {};
 
   // Get the authentication provider from the query.
   query.provider = req.param('provider');
@@ -75,7 +76,7 @@ passport.connect = function (req, query, profile, next) {
 
   // If the provider cannot be identified we cannot match it to a passport so
   // throw an error and let whoever's next in line take care of it.
-  if (!provider){
+  if (!provider) {
     return next(new Error('No authentication provider was identified.'));
   }
 
@@ -101,85 +102,81 @@ passport.connect = function (req, query, profile, next) {
 
   Passport.findOne({
     provider: provider
-  , identifier : query.identifier.toString()
-  }, function (err, passport) {
-    if (err) {
-      return next(err);
-    }
-
-    if (!req.user) {
-      // Scenario: A new user is attempting to sign up using a third-party
-      //           authentication provider.
-      // Action:   Create a new user and assign them a passport.
-      if (!passport) {
-        sails.models.user.create(user, function (err, user) {
-          if (err) {
-            if (err.code === 'E_VALIDATION') {
-              if (err.invalidAttributes.email) {
-                req.flash('error', 'Error.Passport.Email.Exists');
+    , identifier: query.identifier.toString()
+  })
+    .then(function (passport) {
+      if (!req.user) {
+        // Scenario: A new user is attempting to sign up using a third-party
+        //           authentication provider.
+        // Action:   Create a new user and assign them a passport.
+        if (!passport) {
+          sails.models.user.create(user)
+            .then(function (user) {
+              query.user = user.id;
+              Passport.create(query)
+                .then(function (passport) {
+                  next(null, user);
+                })
+                .catch(function (err) {
+                  if (err) {
+                    return next(err);
+                  }
+                });
+            })
+            .catch(function (err) {
+              if (err.code === 'E_VALIDATION') {
+                if (err.invalidAttributes.email) {
+                  req.flash('error', 'Error.Passport.Email.Exists');
+                }
+                else {
+                  req.flash('error', 'Error.Passport.User.Exists');
+                }
               }
-              else {
-                req.flash('error', 'Error.Passport.User.Exists');
-              }
-            }
-
-            return next(err);
-          }
-
-          query.user = user.id;
-
-          Passport.create(query, function (err, passport) {
-            // If a passport wasn't created, bail out
-            if (err) {
               return next(err);
-            }
-
-            next(err, user);
-          });
-        });
-      }
-      // Scenario: An existing user is trying to log in using an already
-      //           connected passport.
-      // Action:   Get the user associated with the passport.
-      else {
-        // If the tokens have changed since the last session, update them
-        if (query.hasOwnProperty('tokens') && query.tokens !== passport.tokens) {
-          passport.tokens = query.tokens;
+            });
         }
-
-        // Save any updates to the Passport before moving on
-        passport.save(function (err, passport) {
-          if (err) {
-            return next(err);
+        // Scenario: An existing user is trying to log in using an already
+        //           connected passport.
+        // Action:   Get the user associated with the passport.
+        else {
+          // If the tokens have changed since the last session, update them
+          if (query.hasOwnProperty('tokens') && query.tokens !== passport.tokens) {
+            passport.tokens = query.tokens;
           }
-
-          // Fetch the user associated with the Passport
-          sails.models.user.findOne(passport.user.id, next);
-        });
-      }
-    } else {
-      // Scenario: A user is currently logged in and trying to connect a new
-      //           passport.
-      // Action:   Create and assign a new passport to the user.
-      if (!passport) {
-        query.user = req.user.id;
-
-        Passport.create(query, function (err, passport) {
-          // If a passport wasn't created, bail out
-          if (err) {
+          // Save any updates to the Passport before moving on
+          passport.save()
+          .then(function (passport) {
+            // Fetch the user associated with the Passport
+            sails.models.user.findOne(passport.user.id, next);
+          })
+          .catch(function (err) {
             return next(err);
-          }
-
-          next(err, req.user);
-        });
+          });
+        }
+      } else {
+        // Scenario: A user is currently logged in and trying to connect a new
+        //           passport.
+        // Action:   Create and assign a new passport to the user.
+        if (!passport) {
+          query.user = req.user.id;
+          Passport.create(query)
+            .then(function (passport) {
+              next(null, req.user);
+            })
+            .catch(function (err) {
+              return next(err);
+            });
+        }
+        // Scenario: The user is a nutjob or spammed the back-button.
+        // Action:   Simply pass along the already established session.
+        else {
+          next(null, req.user);
+        }
       }
-      // Scenario: The user is a nutjob or spammed the back-button.
-      // Action:   Simply pass along the already established session.
-      else {
-        next(null, req.user);
-      }
-    }
-  });
+    })
+    .catch(function (err) {
+      return next(err);
+    });
 };
 
 /**
@@ -194,7 +191,7 @@ passport.connect = function (req, query, profile, next) {
 passport.endpoint = function (req, res) {
   var strategies = sails.config.passport;
   var provider = req.param('provider');
-  var options = { };
+  var options = {};
 
   // If a provider doesn't exist for this endpoint, send the user back to the
   // login page
@@ -238,13 +235,13 @@ passport.callback = function (req, res, next) {
     }
     else if (action === 'disconnect' && req.user) {
       this.protocols.local.disconnect(req, res, next);
-    }    
+    }
     else {
       next(new Error('Invalid action'));
     }
   } else {
     if (action === 'disconnect' && req.user) {
-      this.disconnect(req, res, next) ;
+      this.disconnect(req, res, next);
     } else {
       // The provider will redirect the user to this URL after approval. Finish
       // the authentication process by attempting to obtain an access token. If
@@ -315,8 +312,8 @@ passport.loadStrategies = function () {
 
         case 'openid':
           options.returnURL = url.resolve(baseUrl, callback);
-          options.realm     = baseUrl;
-          options.profile   = true;
+          options.realm = baseUrl;
+          options.profile = true;
           break;
       }
 
@@ -342,14 +339,20 @@ passport.disconnect = function (req, res, next) {
   var Passport = sails.models.passport;
 
   Passport.findOne({
-      provider   : provider,
-      user       : user.id
-    }, function (err, passport) {
-      if (err) return next(err);
-      Passport.destroy(passport.id, function passportDestroyed(error) {
-        if (err) return next(err);
-        next(null, user);
-      });
+    provider: provider,
+    user: user.id
+  })
+  .then(function (passport) {
+    Passport.destroy(passport.id)
+    .then(function () {
+      next(null, user);
+    })
+    .catch(function (err) {
+      return next(err)
+    });
+  })
+  .catch(function (err) {
+    return next(err);
   });
 };
 
